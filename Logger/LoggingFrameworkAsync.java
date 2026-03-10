@@ -12,6 +12,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 enum LogLevelDiff
 {
@@ -205,12 +207,23 @@ class FileLogger extends LoggerAsync
     }
 }
 
+enum AsyncLoggerState
+{
+    RUNNING,
+    SHUTTING_DOWN,
+    TERMINATED
+}
+
 class AsyncLogger
 {
     private AtomicReference<LoggerNew> rootLogger;
+    private AtomicReference<AsyncLoggerState> state;
+    private AtomicInteger activeProducers;
     // using blocking queue will make the producers write in thread safe manner and also blocks the queue in case queue is full.
     private BlockingQueue<LogEvent> bq;
-    private volatile boolean running;
+
+    // currently we are using a single consumer thread but we can have thread pool here as well
+    // just that it will need synchronization at the consume level to avoid threads corrupting each other's processed log messages.
     private Thread consumer;
 
     public AsyncLogger(int cap, LoggerNew rl)
@@ -219,16 +232,28 @@ class AsyncLogger
         this.rootLogger = new AtomicReference<>();
         this.rootLogger.set(rl);
         consumer = new Thread(() -> consume());
-        running = true;
+        state = new AtomicReference<AsyncLoggerState>(AsyncLoggerState.RUNNING);
+        activeProducers = new AtomicInteger(0);
         consumer.start();
     }
 
     public boolean log(LogLevelDiff ll, String message)
     {
-        if(this.running)
+        if(state.get() == AsyncLoggerState.RUNNING)
         {
-            LogEvent ev = new LogEvent(ll, message, Instant.now().toEpochMilli());
-            return this.bq.offer(ev);
+            activeProducers.incrementAndGet();
+            try
+            {
+                if(state.get() != AsyncLoggerState.RUNNING)
+                {
+                    return false;
+                }
+                LogEvent ev = new LogEvent(ll, message, Instant.now().toEpochMilli());
+                return this.bq.offer(ev);
+            }
+            finally{
+                activeProducers.decrementAndGet();
+            }
         }
         else
         {
@@ -253,22 +278,37 @@ class AsyncLogger
 
         while (true) {
             try {
-                if (!this.running) {
-                    // shutdown mode → do NOT block
-                    LogEvent e = bq.poll();
-                    if (e == null) {
-                        break; // queue drained → safe exit
-                    }
-                    rootLogger.get().handle(e);
+                /*
+                    We could have used but this wastes CPU cycles
+                    LogEvent e = bq.poll(); ot it's timeout variant
+
+                    So we can take a hybrid approach where we use take while state is running and then switch to poll when SHUTTING_DOWN.
+                */
+                LogEvent ev;
+                if (state.get() == AsyncLoggerState.RUNNING) {
+                    // Efficient blocking
+                    ev = bq.take();
                 } else {
-                    // normal mode → block
-                    LogEvent e = bq.take();
-                    rootLogger.get().handle(e);
+                    // Drain queue during shutdown
+                    ev = bq.poll();
+
+                    if (ev == null &&
+                        activeProducers.get() == 0) {
+                        break;
+                    }
                 }
+
+                if (ev != null) {
+                    rootLogger.get().handle(ev);
+                    continue;
+                }
+
             } catch (InterruptedException ie) {
                 interrupted = true;
             }
         }
+
+        state.set(AsyncLoggerState.TERMINATED);
 
         if (interrupted) {
             Thread.currentThread().interrupt(); // restore flag
@@ -277,7 +317,9 @@ class AsyncLogger
 
     public void shutdown()
     {
-        this.running = false;
+        if (!state.compareAndSet(AsyncLoggerState.RUNNING, AsyncLoggerState.SHUTTING_DOWN)) {
+            return;
+        }
         consumer.interrupt();
 
         try {
@@ -362,10 +404,14 @@ public class LoggingFrameworkAsync {
             System.out.println("is submitted : " + isLogged.get());
         } catch (InterruptedException | ExecutionException e) {
             System.out.println(e.getMessage());
-            e.printStackTrace();
         }
 
         es.shutdown();
+        try {
+            es.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+}
 
     }
 }
