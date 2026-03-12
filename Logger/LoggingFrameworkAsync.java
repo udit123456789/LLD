@@ -26,20 +26,10 @@ enum LogLevelDiff
     }
 }
 
-interface ILogFormatterNew
-{
-    String format(LogEvent event);
-}
-
 class LogEvent {
     LogLevelDiff level;
     String message;
     Long timestamp;
-
-    public LogEvent()
-    {
-
-    }
 
     public LogEvent(LogLevelDiff ll, String msg, Long time)
     {
@@ -47,6 +37,11 @@ class LogEvent {
         this.message = msg;
         this.timestamp = time;
     }
+}
+
+interface ILogFormatterNew
+{
+    String format(LogEvent event);
 }
 
 class SimplePlainTextFormatterNew implements ILogFormatterNew {
@@ -90,7 +85,6 @@ abstract class LoggerNew {
         this.level = level;
     }
 
-    // but this will not work for multi threaded environment so we create another class.
     private LoggerNew next;
 
     protected void setNextLogger(LoggerNew logger)
@@ -186,7 +180,7 @@ class AsyncLogger
     private BlockingQueue<LogEvent> bq;
 
     // currently we are using a single consumer thread but we can have thread pool here as well
-    // just that it will need synchronization at the consume level to avoid threads corrupting each other's processed log messages.
+    // just that it will need synchronization at the consumer level to avoid threads corrupting each other's processed log messages.
     private Thread consumer;
 
     public AsyncLogger(int cap, LoggerNew rl)
@@ -199,6 +193,7 @@ class AsyncLogger
         consumer.start();
     }
 
+    // public method called to log a message
     public boolean log(LogLevelDiff ll, String message)
     {
         if(state.get() == AsyncLoggerState.RUNNING)
@@ -211,6 +206,7 @@ class AsyncLogger
                     return false;
                 }
                 LogEvent ev = new LogEvent(ll, message, Instant.now().toEpochMilli());
+                // this operation is nonblocking for producers.
                 return this.bq.offer(ev);
             }
             finally{
@@ -225,24 +221,11 @@ class AsyncLogger
 
     private void consume()
     {
-        // this is by default thread safe as only one worker thread is reading from the queue i.e hitting the handler.
-        // but if we increase the worker threads > 1 maybe via thread pool then this can cause issues, so better to handle at handler level.
-        // while (running || !bq.isEmpty()) {
-        //     try {
-        //             LogEvent e = bq.take();
-        //             this.rootLogger.get().handle(e);
-        //     } catch (InterruptedException e) {
-        //         Thread.currentThread().interrupt();
-        //     }
-        // }
-
-        boolean interrupted = false;
-
         while (true) {
             try {
                 /*
-                    We could have used but this wastes CPU cycles
-                    LogEvent e = bq.poll(); ot it's timeout variant
+                    We could have used poll but this wastes CPU cycles
+                    LogEvent e = bq.poll(); or it's timeout variant
 
                     So we can take a hybrid approach where we use take while state is running and then switch to poll when SHUTTING_DOWN.
                 */
@@ -266,25 +249,30 @@ class AsyncLogger
                 }
 
             } catch (InterruptedException ie) {
-                interrupted = true;
+                // continue executing to drain the queue
+                if (state.get() == AsyncLoggerState.SHUTTING_DOWN) {
+                    continue;
+                }
+
+                Thread.currentThread().interrupt();
+                break;
             }
         }
 
         state.set(AsyncLoggerState.TERMINATED);
-
-        if (interrupted) {
-            Thread.currentThread().interrupt(); // restore flag
-        }
     }
 
     public void shutdown()
     {
+        // only one thread will update the state of AsyncLogger
         if (!state.compareAndSet(AsyncLoggerState.RUNNING, AsyncLoggerState.SHUTTING_DOWN)) {
             return;
         }
+        // interrupt the thread so that draining of queue can start
         consumer.interrupt();
 
         try {
+            // wait for the consumer thread to finish
             consumer.join();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -329,7 +317,7 @@ class LoggerHandlerAsync
             loggers.get(i).setNextLogger(loggers.get(i+1));
         }
         loggers.get(loggers.size()-1).setNextLogger(null);
-        //Atomic swap
+        //Atomic swap to avoid any corruption.
         root.set(loggers.get(0));
     }
 }
