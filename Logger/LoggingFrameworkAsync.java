@@ -119,44 +119,7 @@ abstract class LoggerNew {
     protected abstract void write(LogEvent event);
 }
 
-abstract class LoggerAsync extends LoggerNew
-{
-    // this will help make the atomic changes without any partial visibility.
-    private AtomicReference<LoggerNew> next;
-
-    public LoggerAsync(LogLevelDiff ll)
-    {
-        super(ll);
-        this.next = new AtomicReference<>();
-    }
-
-    protected void setNextLogger(LoggerNew logger)
-    {
-        this.next.set(logger);
-    }
-
-    protected boolean canHandle(LogEvent event)
-    {
-        return event.level.priority >= level.priority;
-    }
-
-    public void handle(LogEvent event)
-    {
-        if(canHandle(event))
-        {
-            write(event);
-        }
-
-        LoggerNew nextVal = this.next.get();
-
-        if(nextVal != null)
-        {
-            nextVal.handle(event);
-        }
-    }
-}
-
-class ConsoleLogger extends LoggerAsync
+class ConsoleLogger extends LoggerNew
 {
     private ILogFormatterNew formatter;
 
@@ -172,7 +135,7 @@ class ConsoleLogger extends LoggerAsync
     }
 }
 
-class FileLogger extends LoggerAsync 
+class FileLogger extends LoggerNew 
 {
 
     private ILogFormatterNew formatter;
@@ -229,8 +192,7 @@ class AsyncLogger
     public AsyncLogger(int cap, LoggerNew rl)
     {
         bq = new ArrayBlockingQueue<>(cap);
-        this.rootLogger = new AtomicReference<>();
-        this.rootLogger.set(rl);
+        this.rootLogger = new AtomicReference<>(rl);
         consumer = new Thread(() -> consume());
         state = new AtomicReference<AsyncLoggerState>(AsyncLoggerState.RUNNING);
         activeProducers = new AtomicInteger(0);
@@ -410,8 +372,8 @@ public class LoggingFrameworkAsync {
         try {
             es.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-}
+            Thread.currentThread().interrupt();
+        }
 
     }
 }
