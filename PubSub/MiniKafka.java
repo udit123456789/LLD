@@ -241,32 +241,32 @@ public class MiniKafka {
 
         @Override
         public void run() {
-
-            try {
-
-                while (!Thread.currentThread().isInterrupted()) {
-
-                    Message m;
-
+            while (!Thread.currentThread().isInterrupted()) {
+        
+                Message m;
+        
+                try {
+        
                     synchronized (partition) {
-
+        
                         long offset = group.getOffset(tp);
-
+        
                         while (offset >= partition.endOffset()) {
                             partition.wait();
                             offset = group.getOffset(tp);
                         }
-
+        
                         m = partition.read(offset);
-
+        
                         group.commitOffset(tp, offset + 1);
                     }
-
-                    consumer.process(m);
+        
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        
+                consumer.process(m);
             }
         }
     }
@@ -314,26 +314,20 @@ public class MiniKafka {
         }
 
         public synchronized void addConsumer(Topic topic, Consumer c) {
-
             consumers.add(c);
-
             rebalance(topic);
         }
 
         public synchronized void removeConsumer(Topic topic, Consumer c) {
-
             consumers.remove(c);
-
             rebalance(topic);
         }
 
         public long getOffset(TopicPartition tp) {
-
             return offsets.getOrDefault(tp, 0L);
         }
 
-        public void commitOffset(TopicPartition tp, long offset) {
-
+        public synchronized void commitOffset(TopicPartition tp, long offset) {
             offsets.put(tp, offset);
         }
 
@@ -356,7 +350,7 @@ public class MiniKafka {
             TopicPartition tp =
                     new TopicPartition(topic.getName(), partitionId);
 
-            offsets.put(tp, newOffset);
+            commitOffset(tp, newOffset);
 
             synchronized (target) {
                 target.notifyAll();
