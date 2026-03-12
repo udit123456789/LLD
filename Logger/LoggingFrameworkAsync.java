@@ -370,10 +370,10 @@ public class LoggingFrameworkAsync {
 
         es.shutdown();
         try {
-    es.awaitTermination(5, TimeUnit.SECONDS);
-} catch (InterruptedException e) {
-    Thread.currentThread().interrupt();
-}
+            es.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
 
     }
 }
